@@ -257,6 +257,30 @@ class WanTextEncoder(torch.nn.Module):
         return x
 
 
+class WanActionEncoder(torch.nn.Module):
+
+    def __init__(self, dim=4096, in_dim=None, dropout=0.0, bias=True):
+        super(WanActionEncoder, self).__init__()
+        if in_dim is None:
+            raise ValueError("WanActionEncoder requires `in_dim`. Do not load a text encoder checkpoint; pass action_token_dim when constructing the pipeline.")
+        self.dim = dim
+        self.in_dim = in_dim
+        self.linear = nn.Linear(in_dim, dim, bias=bias)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, action_tokens, mask=None):
+        x = action_tokens
+        if x.ndim == 2:
+            x = x.unsqueeze(0)
+        x = self.linear(x)
+        # x = self.dropout(x)
+        return x
+
+    def load_state_dict(self, state_dict, strict=True, assign=False):
+        # Allow loading from UMT checkpoints by ignoring unmatched keys.
+        return super().load_state_dict(state_dict, strict=False, assign=assign)
+
+
 def basic_clean(text):
     text = ftfy.fix_text(text)
     text = html.unescape(html.unescape(text))

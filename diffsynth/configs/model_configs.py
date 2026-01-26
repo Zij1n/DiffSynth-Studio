@@ -92,7 +92,7 @@ wan_series = [
         # Example: ModelConfig(model_id="Wan-AI/Wan2.1-T2V-14B", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth")
         "model_hash": "9c8818c2cbea55eca56c7b447df170da",
         "model_name": "wan_video_text_encoder",
-        "model_class": "diffsynth.models.wan_video_text_encoder.WanTextEncoder",
+        "model_class": "diffsynth.models.wan_video_text_encoder.WanActionEncoder",
     },
     {
         # Example: ModelConfig(model_id="Wan-AI/Wan2.1-T2V-14B", origin_file_pattern="Wan2.1_VAE.pth")

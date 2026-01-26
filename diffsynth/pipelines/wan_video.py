@@ -18,7 +18,7 @@ from ..diffusion.base_pipeline import BasePipeline, PipelineUnit
 
 from ..models.wan_video_dit import WanModel, sinusoidal_embedding_1d
 from ..models.wan_video_dit_s2v import rope_precompute
-from ..models.wan_video_text_encoder import WanTextEncoder, HuggingfaceTokenizer
+from ..models.wan_video_text_encoder import WanTextEncoder, WanActionEncoder, HuggingfaceTokenizer
 from ..models.wan_video_vae import WanVideoVAE
 from ..models.wan_video_image_encoder import WanImageEncoder
 from ..models.wan_video_vace import VaceWanModel
@@ -103,6 +103,7 @@ class WanVideoPipeline(BasePipeline):
         model_configs: list[ModelConfig] = [],
         tokenizer_config: ModelConfig = ModelConfig(model_id="Wan-AI/Wan2.1-T2V-1.3B", origin_file_pattern="google/umt5-xxl/"),
         audio_processor_config: ModelConfig = None,
+        action_token_dim: Optional[int] = None,
         redirect_common_files: bool = True,
         use_usp: bool = False,
         vram_limit: float = None,
@@ -165,6 +166,16 @@ class WanVideoPipeline(BasePipeline):
         if audio_processor_config is not None:
             audio_processor_config.download_if_necessary()
             pipe.audio_processor = Wav2Vec2Processor.from_pretrained(audio_processor_config.path)
+
+        # Initialize action encoder if no text encoder is loaded
+        if pipe.text_encoder is None and action_token_dim is not None:
+            if pipe.dit is None:
+                raise ValueError("Cannot create action encoder without DiT; ensure the DiT model is loaded.")
+            text_dim = pipe.dit.text_embedding[0].in_features
+            pipe.text_encoder = WanActionEncoder(
+                in_dim=action_token_dim,
+                dim=text_dim,
+            ).to(dtype=torch_dtype, device=device)
         
         # Unified Sequence Parallel
         if use_usp: pipe.enable_usp()
@@ -400,13 +411,20 @@ class WanVideoUnit_PromptEmbedder(PipelineUnit):
     def __init__(self):
         super().__init__(
             seperate_cfg=True,
-            input_params_posi={"prompt": "prompt", "positive": "positive"},
-            input_params_nega={"prompt": "negative_prompt", "positive": "positive"},
+            input_params_posi={"prompt": "prompt", "positive": "positive", "action_tokens": "action_tokens"},
+            input_params_nega={"prompt": "negative_prompt", "positive": "positive", "action_tokens": "action_tokens"},
             output_params=("context",),
             onload_model_names=("text_encoder",)
         )
     
-    def encode_prompt(self, pipe: WanVideoPipeline, prompt):
+    def encode_prompt(self, pipe: WanVideoPipeline, prompt=None, action_tokens=None):
+        if action_tokens is not None:
+            if not isinstance(action_tokens, torch.Tensor):
+                action_tokens = torch.tensor(action_tokens)
+            action_tokens = action_tokens.to(dtype=pipe.torch_dtype, device=pipe.device)
+            return pipe.text_encoder(action_tokens)
+        if prompt is None:
+            raise ValueError("Either prompt or action_tokens must be provided.")
         ids, mask = pipe.tokenizer(prompt, return_mask=True, add_special_tokens=True)
         ids = ids.to(pipe.device)
         mask = mask.to(pipe.device)
@@ -416,9 +434,9 @@ class WanVideoUnit_PromptEmbedder(PipelineUnit):
             prompt_emb[:, v:] = 0
         return prompt_emb
 
-    def process(self, pipe: WanVideoPipeline, prompt, positive) -> dict:
+    def process(self, pipe: WanVideoPipeline, prompt, positive, action_tokens=None) -> dict:
         pipe.load_models_to_device(self.onload_model_names)
-        prompt_emb = self.encode_prompt(pipe, prompt)
+        prompt_emb = self.encode_prompt(pipe, prompt=prompt, action_tokens=action_tokens)
         return {"context": prompt_emb}
 
 

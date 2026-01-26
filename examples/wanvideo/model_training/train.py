@@ -1,6 +1,6 @@
 import torch, os, argparse, accelerate, warnings
 from diffsynth.core import UnifiedDataset
-from diffsynth.core.data.operators import LoadVideo, LoadAudio, ImageCropAndResize, ToAbsolutePath
+from diffsynth.core.data.operators import LoadVideo, LoadAudio, ImageCropAndResize, ToAbsolutePath, LoadTorchPickle
 from diffsynth.pipelines.wan_video import WanVideoPipeline, ModelConfig
 from diffsynth.diffusion import *
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -11,6 +11,7 @@ class WanTrainingModule(DiffusionTrainingModule):
         self,
         model_paths=None, model_id_with_origin_paths=None,
         tokenizer_path=None, audio_processor_path=None,
+        action_token_dim=None,
         trainable_models=None,
         lora_base_model=None, lora_target_modules="", lora_rank=32, lora_checkpoint=None,
         preset_lora_path=None, preset_lora_model=None,
@@ -31,10 +32,24 @@ class WanTrainingModule(DiffusionTrainingModule):
             use_gradient_checkpointing = True
         
         # Load models
+        extra_inputs_list = extra_inputs.split(",") if extra_inputs is not None else []
         model_configs = self.parse_model_configs(model_paths, model_id_with_origin_paths, fp8_models=fp8_models, offload_models=offload_models, device=device)
-        tokenizer_config = ModelConfig(model_id="Wan-AI/Wan2.1-T2V-1.3B", origin_file_pattern="google/umt5-xxl/") if tokenizer_path is None else ModelConfig(tokenizer_path)
-        audio_processor_config = ModelConfig(model_id="Wan-AI/Wan2.2-S2V-14B", origin_file_pattern="wav2vec2-large-xlsr-53-english/") if audio_processor_path is None else ModelConfig(audio_processor_path)
-        self.pipe = WanVideoPipeline.from_pretrained(torch_dtype=torch.bfloat16, device=device, model_configs=model_configs, tokenizer_config=tokenizer_config, audio_processor_config=audio_processor_config)
+        if tokenizer_path is None and action_token_dim is not None:
+            tokenizer_config = None
+        else:
+            tokenizer_config = ModelConfig(model_id="Wan-AI/Wan2.1-T2V-1.3B", origin_file_pattern="google/umt5-xxl/") if tokenizer_path is None else ModelConfig(tokenizer_path)
+        if audio_processor_path is None and "input_audio" not in extra_inputs_list:
+            audio_processor_config = None
+        else:
+            audio_processor_config = ModelConfig(model_id="Wan-AI/Wan2.2-S2V-14B", origin_file_pattern="wav2vec2-large-xlsr-53-english/") if audio_processor_path is None else ModelConfig(audio_processor_path)
+        self.pipe = WanVideoPipeline.from_pretrained(
+            torch_dtype=torch.bfloat16,
+            device=device,
+            model_configs=model_configs,
+            tokenizer_config=tokenizer_config,
+            audio_processor_config=audio_processor_config,
+            action_token_dim=action_token_dim,
+        )
         self.pipe = self.split_pipeline_units(task, self.pipe, trainable_models, lora_base_model)
         
         # Training mode
@@ -48,7 +63,7 @@ class WanTrainingModule(DiffusionTrainingModule):
         # Store other configs
         self.use_gradient_checkpointing = use_gradient_checkpointing
         self.use_gradient_checkpointing_offload = use_gradient_checkpointing_offload
-        self.extra_inputs = extra_inputs.split(",") if extra_inputs is not None else []
+        self.extra_inputs = extra_inputs_list
         self.fp8_models = fp8_models
         self.task = task
         self.task_to_loss = {
@@ -75,8 +90,14 @@ class WanTrainingModule(DiffusionTrainingModule):
         return inputs_shared
     
     def get_pipeline_inputs(self, data):
-        inputs_posi = {"prompt": data["prompt"]}
-        inputs_nega = {}
+        action_tokens = data.get("action_tokens")
+        if action_tokens is not None and not isinstance(action_tokens, torch.Tensor):
+            if isinstance(action_tokens, str):
+                action_tokens = torch.load(action_tokens, map_location="cpu")
+            else:
+                action_tokens = torch.tensor(action_tokens)
+        inputs_posi = {"prompt": data.get("prompt", ""), "action_tokens": action_tokens}
+        inputs_nega = {"negative_prompt": data.get("negative_prompt", ""), "action_tokens": action_tokens}
         inputs_shared = {
             # Assume you are using this pipeline for inference,
             # please fill in the input parameters.
@@ -114,6 +135,7 @@ def wan_parser():
     parser = add_video_size_config(parser)
     parser.add_argument("--tokenizer_path", type=str, default=None, help="Path to tokenizer.")
     parser.add_argument("--audio_processor_path", type=str, default=None, help="Path to the audio processor. If provided, the processor will be used for Wan2.2-S2V model.")
+    parser.add_argument("--action_token_dim", type=int, default=None, help="Width of action tokens (last dimension). Required when using action tokens without text.")
     parser.add_argument("--max_timestep_boundary", type=float, default=1.0, help="Max timestep boundary (for mixed models, e.g., Wan-AI/Wan2.2-I2V-A14B).")
     parser.add_argument("--min_timestep_boundary", type=float, default=0.0, help="Min timestep boundary (for mixed models, e.g., Wan-AI/Wan2.2-I2V-A14B).")
     parser.add_argument("--initialize_model_on_cpu", default=False, action="store_true", help="Whether to initialize models on CPU.")
@@ -146,6 +168,7 @@ if __name__ == "__main__":
         special_operator_map={
             "animate_face_video": ToAbsolutePath(args.dataset_base_path) >> LoadVideo(args.num_frames, 4, 1, frame_processor=ImageCropAndResize(512, 512, None, 16, 16)),
             "input_audio": ToAbsolutePath(args.dataset_base_path) >> LoadAudio(sr=16000),
+            "action_tokens": ToAbsolutePath(args.dataset_base_path) >> LoadTorchPickle(),
         }
     )
     model = WanTrainingModule(
@@ -153,6 +176,7 @@ if __name__ == "__main__":
         model_id_with_origin_paths=args.model_id_with_origin_paths,
         tokenizer_path=args.tokenizer_path,
         audio_processor_path=args.audio_processor_path,
+        action_token_dim=args.action_token_dim,
         trainable_models=args.trainable_models,
         lora_base_model=args.lora_base_model,
         lora_target_modules=args.lora_target_modules,

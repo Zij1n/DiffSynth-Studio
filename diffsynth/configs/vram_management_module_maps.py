@@ -106,6 +106,10 @@ VRAM_MANAGEMENT_MODULE_MAPS = {
         "diffsynth.models.wan_video_text_encoder.T5RelativeEmbedding": "diffsynth.core.vram.layers.AutoWrappedModule",
         "diffsynth.models.wan_video_text_encoder.T5LayerNorm": "diffsynth.core.vram.layers.AutoWrappedModule",
     },
+    "diffsynth.models.wan_video_text_encoder.WanActionEncoder": {
+        "torch.nn.Linear": "diffsynth.core.vram.layers.AutoWrappedLinear",
+        "torch.nn.Dropout": "diffsynth.core.vram.layers.AutoWrappedModule",
+    },
     "diffsynth.models.wan_video_vace.VaceWanModel": {
         "diffsynth.models.wan_video_dit.DiTBlock": "diffsynth.core.vram.layers.AutoWrappedModule",
         "torch.nn.Linear": "diffsynth.core.vram.layers.AutoWrappedLinear",
