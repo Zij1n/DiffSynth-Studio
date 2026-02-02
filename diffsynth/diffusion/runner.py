@@ -23,6 +23,9 @@ def launch_training_task(
         num_workers = args.dataset_num_workers
         save_steps = args.save_steps
         num_epochs = args.num_epochs
+        resume_num_steps = args.resume_num_steps
+    else:
+        resume_num_steps = None
     
     optimizer = torch.optim.AdamW(model.trainable_modules(), lr=learning_rate, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.ConstantLR(optimizer)
@@ -30,8 +33,19 @@ def launch_training_task(
     
     model, optimizer, dataloader, scheduler = accelerator.prepare(model, optimizer, dataloader, scheduler)
     
+    if resume_num_steps is None:
+        resume_num_steps = 0
+    if resume_num_steps > 0 and accelerator.is_main_process:
+        print(f"Fast-forwarding dataloader by {resume_num_steps} steps.")
+    skipped_steps = 0
+
     for epoch_id in range(num_epochs):
         for data in tqdm(dataloader):
+            if skipped_steps < resume_num_steps:
+                skipped_steps += 1
+                if skipped_steps == resume_num_steps and accelerator.is_main_process:
+                    print("Fast-forward complete.")
+                continue
             with accelerator.accumulate(model):
                 optimizer.zero_grad()
                 if dataset.load_from_cache:

@@ -22,8 +22,8 @@ export DIFFSYNTH_MODEL_BASE_PATH=/scratch/zh2025/DiffSynth-Studio/models
 export DIFFSYNTH_SKIP_DOWNLOAD=true
 
 accelerate launch examples/wanvideo/model_training/train.py \
-  --dataset_base_path /scratch/zh2025/finetune_action/DiffSynth-Studio/data/lerobot_clothes_folding_25f \
-  --dataset_metadata_path /scratch/zh2025/finetune_action/DiffSynth-Studio/data/lerobot_clothes_folding_25f/metadata.csv \
+  --dataset_base_path /scratch/zh2025/finetune_action/DiffSynth-Studio/data/lerobot_clothes_folding_25f_100k \
+  --dataset_metadata_path /scratch/zh2025/finetune_action/DiffSynth-Studio/data/lerobot_clothes_folding_25f_100k/metadata.csv \
   --data_file_keys "video,action_tokens" \
   --height 256 \
   --width 256 \
@@ -35,6 +35,9 @@ accelerate launch examples/wanvideo/model_training/train.py \
   ]' \
   --action_token_dim 256 \
   --gradient_accumulation_steps 16 \
+  --save_steps 5000 \
+  --resume_from_checkpoint /scratch/zh2025/finetune_action/DiffSynth-Studio/models/train/Wan2.2-TI2V-5B_full/step-15000.safetensors \
+  --resume_num_steps 15000 \
   --learning_rate 1e-5 \
   --num_epochs 1 \
   --remove_prefix_in_ckpt "pipe.dit." \

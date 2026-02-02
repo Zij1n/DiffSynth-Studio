@@ -43,6 +43,8 @@ def add_output_config(parser: argparse.ArgumentParser):
     parser.add_argument("--output_path", type=str, default="./models", help="Output save path.")
     parser.add_argument("--remove_prefix_in_ckpt", type=str, default="pipe.dit.", help="Remove prefix in ckpt.")
     parser.add_argument("--save_steps", type=int, default=None, help="Number of checkpoint saving invervals. If None, checkpoints will be saved every epoch.")
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="Path to a trainable checkpoint to load before training.")
+    parser.add_argument("--resume_num_steps", type=int, default=None, help="Step number to resume from (for logging/checkpoint naming). If not set, inferred from checkpoint filename if it contains step-<N>.")
     return parser
 
 def add_lora_config(parser: argparse.ArgumentParser):

@@ -1,5 +1,5 @@
-import torch, os, argparse, accelerate, warnings
-from diffsynth.core import UnifiedDataset
+import torch, os, argparse, accelerate, warnings, re
+from diffsynth.core import UnifiedDataset, load_state_dict
 from diffsynth.core.data.operators import LoadVideo, LoadAudio, ImageCropAndResize, ToAbsolutePath, LoadTorchPickle
 from diffsynth.pipelines.wan_video import WanVideoPipeline, ModelConfig
 from diffsynth.diffusion import *
@@ -194,10 +194,39 @@ if __name__ == "__main__":
         max_timestep_boundary=args.max_timestep_boundary,
         min_timestep_boundary=args.min_timestep_boundary,
     )
+    if args.resume_from_checkpoint is not None:
+        state_dict = load_state_dict(
+            args.resume_from_checkpoint,
+            torch_dtype=model.pipe.torch_dtype,
+            device="cpu",
+        )
+        if args.remove_prefix_in_ckpt:
+            fixed_state_dict = {}
+            for key, value in state_dict.items():
+                if key.startswith("pipe."):
+                    fixed_state_dict[key] = value
+                else:
+                    fixed_state_dict[args.remove_prefix_in_ckpt + key] = value
+            state_dict = fixed_state_dict
+        load_result = model.load_state_dict(state_dict, strict=False)
+        print(f"Resume checkpoint loaded: {args.resume_from_checkpoint}")
+        if len(load_result.missing_keys) > 0:
+            print(f"Resume checkpoint missing keys (first 20): {load_result.missing_keys[:20]}")
+        if len(load_result.unexpected_keys) > 0:
+            print(f"Resume checkpoint unexpected keys (first 20): {load_result.unexpected_keys[:20]}")
     model_logger = ModelLogger(
         args.output_path,
         remove_prefix_in_ckpt=args.remove_prefix_in_ckpt,
     )
+    if args.resume_from_checkpoint is not None:
+        resume_num_steps = args.resume_num_steps
+        if resume_num_steps is None:
+            match = re.search(r"step-(\d+)", os.path.basename(args.resume_from_checkpoint))
+            if match:
+                resume_num_steps = int(match.group(1))
+        if resume_num_steps is not None:
+            model_logger.num_steps = resume_num_steps
+            print(f"Resuming training from step {resume_num_steps}.")
     launcher_map = {
         "sft:data_process": launch_data_process_task,
         "direct_distill:data_process": launch_data_process_task,
