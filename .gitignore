@@ -175,3 +175,4 @@ cython_debug/
 #.idea/
 *.err
 *.out
+inference_gifs/

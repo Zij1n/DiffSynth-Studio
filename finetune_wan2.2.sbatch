@@ -28,7 +28,7 @@ accelerate launch examples/wanvideo/model_training/train.py \
   --height 256 \
   --width 256 \
   --num_frames 25 \
-  --dataset_repeat 1 \
+  --dataset_repeat 100 \
   --model_id_with_origin_paths "Wan-AI/Wan2.2-TI2V-5B:diffusion_pytorch_model*.safetensors" \
   --model_paths '[
     "/scratch/zh2025/DiffSynth-Studio/models/Wan-AI/Wan2.2-TI2V-5B/Wan2.2_VAE.pth"
@@ -36,10 +36,10 @@ accelerate launch examples/wanvideo/model_training/train.py \
   --action_token_dim 256 \
   --gradient_accumulation_steps 16 \
   --save_steps 5000 \
-  --resume_from_checkpoint /scratch/zh2025/finetune_action/DiffSynth-Studio/models/train/Wan2.2-TI2V-5B_full/step-15000.safetensors \
-  --resume_num_steps 15000 \
+  --resume_from_checkpoint /scratch/zh2025/finetune_action/DiffSynth-Studio/models/train/Wan2.2-TI2V-5B_full/step-22540.safetensors \
+  --resume_num_steps 22540 \
   --learning_rate 1e-5 \
-  --num_epochs 1 \
+  --num_epochs 2 \
   --remove_prefix_in_ckpt "pipe.dit." \
   --output_path "./models/train/Wan2.2-TI2V-5B_full" \
   --trainable_models "dit,text_encoder" \
