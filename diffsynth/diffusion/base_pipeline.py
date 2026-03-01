@@ -247,6 +247,8 @@ class BasePipeline(torch.nn.Module):
                 lora = load_state_dict(lora_config.path, torch_dtype=self.torch_dtype, device=self.device)
         else:
             lora = state_dict
+        if hasattr(module, "configure_from_state_dict_metadata"):
+            module.configure_from_state_dict_metadata(lora)
         lora_loader = self.lora_loader(torch_dtype=self.torch_dtype, device=self.device)
         lora = lora_loader.convert_state_dict(lora)
         if hotload is None:
@@ -293,6 +295,7 @@ class BasePipeline(torch.nn.Module):
             vram_config["computation_device"] = vram_config["computation_device"] or self.device
             model_pool.auto_load_model(
                 model_config.path,
+                model_config=model_config,
                 vram_config=vram_config,
                 vram_limit=vram_limit,
                 clear_parameters=model_config.clear_parameters,

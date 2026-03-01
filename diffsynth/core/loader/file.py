@@ -2,6 +2,17 @@ from safetensors import safe_open
 import torch, hashlib
 
 
+MODEL_HASH_IGNORED_PREFIXES = (
+    "_action_conditioning.",
+    "action_embedder.",
+    "action_t_embedding_norm.",
+)
+
+
+def include_key_in_model_hash(key: str):
+    return not key.startswith(MODEL_HASH_IGNORED_PREFIXES)
+
+
 def load_state_dict(file_path, torch_dtype=None, device="cpu"):
     if isinstance(file_path, list):
         state_dict = {}
@@ -44,6 +55,8 @@ def convert_state_dict_keys_to_single_str(state_dict, with_shape=True):
     keys = []
     for key, value in state_dict.items():
         if isinstance(key, str):
+            if not include_key_in_model_hash(key):
+                continue
             if isinstance(value, torch.Tensor):
                 if with_shape:
                     shape = "_".join(map(str, list(value.shape)))
@@ -102,6 +115,8 @@ def convert_keys_dict_to_single_str(state_dict, with_shape=True):
     keys = []
     for key, value in state_dict.items():
         if isinstance(key, str):
+            if not include_key_in_model_hash(key):
+                continue
             if isinstance(value, dict):
                 keys.append(key + "|" + convert_keys_dict_to_single_str(value, with_shape=with_shape))
             else:

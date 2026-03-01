@@ -5,6 +5,11 @@ from .file import load_state_dict
 import torch
 
 
+def prepare_model_from_state_dict_metadata(model, state_dict):
+    if hasattr(model, "configure_from_state_dict_metadata"):
+        model.configure_from_state_dict_metadata(state_dict)
+
+
 def load_model(model_class, path, config=None, torch_dtype=torch.bfloat16, device="cpu", state_dict_converter=None, use_disk_map=False, module_map=None, vram_config=None, vram_limit=None):
     config = {} if config is None else config
     # Why do we use `skip_model_initialization`?
@@ -25,10 +30,12 @@ def load_model(model_class, path, config=None, torch_dtype=torch.bfloat16, devic
                 state_dict = state_dict_converter(state_dict)
             else:
                 state_dict = {i: state_dict[i] for i in state_dict}
+            prepare_model_from_state_dict_metadata(model, state_dict)
             model.load_state_dict(state_dict, assign=True)
             model = enable_vram_management(model, module_map, vram_config=vram_config, disk_map=None, vram_limit=vram_limit)
         else:
             disk_map = DiskMap(path, device, state_dict_converter=state_dict_converter)
+            prepare_model_from_state_dict_metadata(model, disk_map)
             model = enable_vram_management(model, module_map, vram_config=vram_config, disk_map=disk_map, vram_limit=vram_limit)
     else:
         # Why do we use `DiskMap`?
@@ -46,6 +53,7 @@ def load_model(model_class, path, config=None, torch_dtype=torch.bfloat16, devic
             state_dict = state_dict_converter(state_dict)
         else:
             state_dict = {i: state_dict[i] for i in state_dict}
+        prepare_model_from_state_dict_metadata(model, state_dict)
         model.load_state_dict(state_dict, assign=True)
         # Why do we call `to()`?
         # Because some models override the behavior of `to()`,

@@ -48,12 +48,29 @@ class DiffusionTrainingModule(torch.nn.Module):
                 new_state_dict[new_key] = value
             elif "lora_A.default.weight" in key or "lora_B.default.weight" in key:
                 new_state_dict[key] = value
+            elif key.startswith("_action_conditioning."):
+                new_state_dict[key] = value
         return new_state_dict
 
 
     def export_trainable_state_dict(self, state_dict, remove_prefix=None):
         trainable_param_names = self.trainable_param_names()
-        state_dict = {name: param for name, param in state_dict.items() if name in trainable_param_names}
+        extra_state_dict_keys = set()
+        for module_name, module in self.named_modules():
+            if hasattr(module, "extra_trainable_state_dict_keys"):
+                module_prefix = "" if module_name == "" else module_name + "."
+                if module_name == "":
+                    has_trainable_params = len(trainable_param_names) > 0
+                else:
+                    has_trainable_params = any(name.startswith(module_prefix) for name in trainable_param_names)
+                if not has_trainable_params:
+                    continue
+                prefix = "" if module_name == "" else module_name + "."
+                extra_state_dict_keys.update(prefix + key for key in module.extra_trainable_state_dict_keys())
+        state_dict = {
+            name: param for name, param in state_dict.items()
+            if name in trainable_param_names or name in extra_state_dict_keys
+        }
         if remove_prefix is not None:
             state_dict_ = {}
             for name, param in state_dict.items():
@@ -224,6 +241,8 @@ class DiffusionTrainingModule(torch.nn.Module):
             if lora_checkpoint is not None:
                 state_dict = load_state_dict(lora_checkpoint)
                 state_dict = self.mapping_lora_state_dict(state_dict)
+                if hasattr(model, "configure_from_state_dict_metadata"):
+                    model.configure_from_state_dict_metadata(state_dict)
                 load_result = model.load_state_dict(state_dict, strict=False)
                 print(f"LoRA checkpoint loaded: {lora_checkpoint}, total {len(state_dict)} keys")
                 if len(load_result[1]) > 0:

@@ -16,7 +16,7 @@ from ..diffusion import FlowMatchScheduler
 from ..core import ModelConfig, gradient_checkpoint_forward
 from ..diffusion.base_pipeline import BasePipeline, PipelineUnit
 
-from ..models.wan_video_dit import WanModel, sinusoidal_embedding_1d
+from ..models.wan_video_dit import WanModel
 from ..models.wan_video_dit_s2v import rope_precompute
 from ..models.wan_video_text_encoder import WanTextEncoder, HuggingfaceTokenizer
 from ..models.wan_video_vae import WanVideoVAE
@@ -94,6 +94,17 @@ class WanVideoPipeline(BasePipeline):
             self.dit2.forward = types.MethodType(usp_dit_forward, self.dit2)
         self.sp_size = get_sequence_parallel_world_size()
         self.use_unified_sequence_parallel = True
+
+
+    def configure_action_conditioning(self, action_steps: int, action_feature_dim: int):
+        if self.vram_management_enabled:
+            raise RuntimeError(
+                "Action conditioning must be configured before model loading when VRAM management or disk offload is enabled."
+            )
+        for model_name in ("dit", "dit2"):
+            model = getattr(self, model_name)
+            if isinstance(model, WanModel):
+                model.configure_action_conditioning(action_steps, action_feature_dim)
 
 
     @staticmethod
@@ -194,6 +205,7 @@ class WanVideoPipeline(BasePipeline):
         s2v_pose_video: Optional[list[Image.Image]] = None,
         s2v_pose_latents: Optional[torch.Tensor] = None,
         motion_video: Optional[list[Image.Image]] = None,
+        action: Optional[torch.Tensor] = None,
         # ControlNet
         control_video: Optional[list[Image.Image]] = None,
         reference_image: Optional[Image.Image] = None,
@@ -278,6 +290,7 @@ class WanVideoPipeline(BasePipeline):
             "tiled": tiled, "tile_size": tile_size, "tile_stride": tile_stride,
             "sliding_window_size": sliding_window_size, "sliding_window_stride": sliding_window_stride,
             "input_audio": input_audio, "audio_sample_rate": audio_sample_rate, "s2v_pose_video": s2v_pose_video, "audio_embeds": audio_embeds, "s2v_pose_latents": s2v_pose_latents, "motion_video": motion_video,
+            "action": action,
             "animate_pose_video": animate_pose_video, "animate_face_video": animate_face_video, "animate_inpaint_video": animate_inpaint_video, "animate_mask_video": animate_mask_video,
             "vap_video": vap_video, 
         }
@@ -1158,6 +1171,7 @@ def model_fn_wan_video(
     use_gradient_checkpointing_offload: bool = False,
     control_camera_latents_input = None,
     fuse_vae_embedding_in_latents: bool = False,
+    action: Optional[torch.Tensor] = None,
     **kwargs,
 ):
     if sliding_window_size is not None and sliding_window_stride is not None:
@@ -1176,6 +1190,7 @@ def model_fn_wan_video(
             tea_cache=tea_cache,
             use_unified_sequence_parallel=use_unified_sequence_parallel,
             motion_bucket_id=motion_bucket_id,
+            action=action,
         )
         return TemporalTiler_BCTHW().run(
             model_fn_wan_video,
@@ -1220,19 +1235,32 @@ def model_fn_wan_video(
                                             get_sp_group)
 
     # Timestep
+    time_device = latents.device if latents is not None else timestep.device
+    time_dtype = latents.dtype if latents is not None else (timestep.dtype if torch.is_floating_point(timestep) else torch.float32)
     if dit.seperated_timestep and fuse_vae_embedding_in_latents:
         timestep = torch.concat([
             torch.zeros((1, latents.shape[3] * latents.shape[4] // 4), dtype=latents.dtype, device=latents.device),
             torch.ones((latents.shape[2] - 1, latents.shape[3] * latents.shape[4] // 4), dtype=latents.dtype, device=latents.device) * timestep
         ]).flatten()
-        t = dit.time_embedding(sinusoidal_embedding_1d(dit.freq_dim, timestep).unsqueeze(0))
+        t = dit.build_conditioned_time_embedding(
+            timestep,
+            action=action,
+            device=time_device,
+            dtype=time_dtype,
+            expand_to_sequence=True,
+        )
         if use_unified_sequence_parallel and dist.is_initialized() and dist.get_world_size() > 1:
             t_chunks = torch.chunk(t, get_sequence_parallel_world_size(), dim=1)
             t_chunks = [torch.nn.functional.pad(chunk, (0, 0, 0, t_chunks[0].shape[1]-chunk.shape[1]), value=0) for chunk in t_chunks]
             t = t_chunks[get_sequence_parallel_rank()]
         t_mod = dit.time_projection(t).unflatten(2, (6, dit.dim))
     else:
-        t = dit.time_embedding(sinusoidal_embedding_1d(dit.freq_dim, timestep))
+        t = dit.build_conditioned_time_embedding(
+            timestep,
+            action=action,
+            device=time_device,
+            dtype=time_dtype,
+        )
         t_mod = dit.time_projection(t).unflatten(1, (6, dit.dim))
     
     # Motion Controller

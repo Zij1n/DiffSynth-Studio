@@ -1,0 +1,21 @@
+accelerate launch --config_file examples/wanvideo/model_training/full/accelerate_config_5B_4gpu.yaml examples/wanvideo/model_training/train.py \
+  --dataset_base_path /scratch/zh2025/finetune_action/cosmos-predict2/cloth_folding \
+  --dataset_type cloth_folding_action \
+  --action_dataset_split train \
+  --action_dataset_sequence_interval 1 \
+  --action_dataset_val_start_frame_interval 1 \
+  --action_dataset_prompt "cloth folding" \
+  --action_feature_dim 20 \
+  --height 256 \
+  --width 256 \
+  --num_frames 13 \
+  --dataset_repeat 1 \
+  --dataset_num_workers 4 \
+  --model_id_with_origin_paths "Wan-AI/Wan2.2-TI2V-5B:diffusion_pytorch_model*.safetensors,Wan-AI/Wan2.2-TI2V-5B:models_t5_umt5-xxl-enc-bf16.pth,Wan-AI/Wan2.2-TI2V-5B:Wan2.2_VAE.pth" \
+  --learning_rate 1e-5 \
+  --num_epochs 5 \
+  --remove_prefix_in_ckpt "pipe.dit." \
+  --output_path "./models/train/Wan2.2-TI2V-5B_cloth_folding_full" \
+  --trainable_models "dit" \
+  --extra_inputs "input_image" \
+  --use_gradient_checkpointing_offload

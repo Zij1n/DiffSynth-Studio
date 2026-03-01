@@ -72,6 +72,30 @@ def sinusoidal_embedding_1d(dim, position):
     return x.to(position.dtype)
 
 
+def build_wan_time_embedding(
+    time_embedding: nn.Module,
+    freq_dim: int,
+    timestep: torch.Tensor,
+    device: Optional[torch.device] = None,
+    dtype: Optional[torch.dtype] = None,
+    expand_to_sequence: bool = False,
+):
+    device = timestep.device if device is None else device
+    if dtype is None:
+        dtype = timestep.dtype if torch.is_floating_point(timestep) else torch.float32
+
+    timestep = timestep.to(device=device, dtype=dtype)
+    timestep_freqs = sinusoidal_embedding_1d(freq_dim, timestep)
+    if expand_to_sequence:
+        timestep_freqs = timestep_freqs.unsqueeze(0)
+    return time_embedding(timestep_freqs)
+
+
+ACTION_STEPS_STATE_KEY = "_action_conditioning.action_steps"
+ACTION_FEATURE_DIM_STATE_KEY = "_action_conditioning.action_feature_dim"
+ACTION_STATE_PREFIXES = ("action_embedder.", "action_t_embedding_norm.")
+
+
 def precompute_freqs_cis_3d(dim: int, end: int = 1024, theta: float = 10000.0):
     # 3d rope precompute
     f_freqs_cis = precompute_freqs_cis(dim - 2 * (dim // 3), end, theta)
@@ -251,6 +275,24 @@ class MLP(torch.nn.Module):
         return self.proj(x)
 
 
+class ActionEmbeddingMLP(nn.Module):
+    def __init__(self, in_features: int, hidden_features: int, out_features: int):
+        super().__init__()
+        self.fc1 = nn.Linear(in_features, hidden_features)
+        self.activation = nn.GELU(approximate="tanh")
+        self.fc2 = nn.Linear(hidden_features, out_features)
+
+    def reset_parameters(self):
+        self.fc1.reset_parameters()
+        self.fc2.reset_parameters()
+
+    def forward(self, x: torch.Tensor):
+        x = self.fc1(x)
+        x = self.activation(x)
+        x = self.fc2(x)
+        return x
+
+
 class Head(nn.Module):
     def __init__(self, dim: int, out_dim: int, patch_size: Tuple[int, int, int], eps: float):
         super().__init__()
@@ -292,6 +334,8 @@ class WanModel(torch.nn.Module):
         require_vae_embedding: bool = True,
         require_clip_embedding: bool = True,
         fuse_vae_embedding_in_latents: bool = False,
+        action_steps: Optional[int] = None,
+        action_feature_dim: Optional[int] = None,
     ):
         super().__init__()
         self.dim = dim
@@ -303,6 +347,11 @@ class WanModel(torch.nn.Module):
         self.require_vae_embedding = require_vae_embedding
         self.require_clip_embedding = require_clip_embedding
         self.fuse_vae_embedding_in_latents = fuse_vae_embedding_in_latents
+        self.action_steps: Optional[int] = None
+        self.action_feature_dim: Optional[int] = None
+        self.action_flat_dim: Optional[int] = None
+        self.action_embedder: Optional[ActionEmbeddingMLP] = None
+        self.action_t_embedding_norm: Optional[RMSNorm] = None
 
         self.patch_embedding = nn.Conv3d(
             in_dim, dim, kernel_size=patch_size, stride=patch_size)
@@ -336,6 +385,216 @@ class WanModel(torch.nn.Module):
             self.control_adapter = SimpleAdapter(in_dim_control_adapter, dim, kernel_size=patch_size[1:], stride=patch_size[1:])
         else:
             self.control_adapter = None
+        if (action_steps is None) != (action_feature_dim is None):
+            raise ValueError("action_steps and action_feature_dim must be provided together.")
+        if action_steps is not None and action_feature_dim is not None:
+            self.configure_action_conditioning(action_steps, action_feature_dim)
+
+    def configure_action_conditioning(self, action_steps: int, action_feature_dim: int):
+        if action_steps <= 0:
+            raise ValueError(f"action_steps must be positive, got {action_steps}")
+        if action_feature_dim <= 0:
+            raise ValueError(f"action_feature_dim must be positive, got {action_feature_dim}")
+
+        action_flat_dim = action_steps * action_feature_dim
+        if (
+            self.action_embedder is not None
+            and self.action_flat_dim == action_flat_dim
+        ):
+            self.action_steps = action_steps
+            self.action_feature_dim = action_feature_dim
+            return
+
+        self.action_steps = action_steps
+        self.action_feature_dim = action_feature_dim
+        self.action_flat_dim = action_flat_dim
+
+        device = self.time_embedding[0].weight.device
+        dtype = self.time_embedding[0].weight.dtype
+        self.action_embedder = ActionEmbeddingMLP(
+            in_features=action_flat_dim,
+            hidden_features=self.dim * 4,
+            out_features=self.dim,
+        ).to(device=device, dtype=dtype)
+        self.action_t_embedding_norm = RMSNorm(self.dim, eps=1e-6).to(device=device, dtype=dtype)
+
+    def initialize_missing_action_conditioning(self):
+        if self.action_steps is None or self.action_feature_dim is None:
+            raise RuntimeError("Cannot initialize action conditioning without action_steps and action_feature_dim.")
+        if self.action_embedder is None or self.action_t_embedding_norm is None:
+            self.configure_action_conditioning(self.action_steps, self.action_feature_dim)
+        if not any(param.is_meta for param in self.action_embedder.parameters()) and not any(param.is_meta for param in self.action_t_embedding_norm.parameters()):
+            return
+
+        device = self.time_embedding[0].weight.device
+        dtype = self.time_embedding[0].weight.dtype
+        action_steps = self.action_steps
+        action_feature_dim = self.action_feature_dim
+        self.action_embedder = None
+        self.action_t_embedding_norm = None
+        self.action_flat_dim = None
+        self.configure_action_conditioning(action_steps, action_feature_dim)
+
+    def state_dict(self, *args, destination=None, prefix="", keep_vars=False):
+        if len(args) > 3:
+            raise TypeError(f"state_dict() received too many positional arguments: expected at most 3, got {len(args)}")
+        if len(args) >= 1:
+            destination = args[0]
+        if len(args) >= 2:
+            prefix = args[1]
+        if len(args) >= 3:
+            keep_vars = args[2]
+        state_dict = super().state_dict(destination=destination, prefix=prefix, keep_vars=keep_vars)
+        if self.action_steps is not None and self.action_feature_dim is not None:
+            state_dict[prefix + ACTION_STEPS_STATE_KEY] = torch.tensor(self.action_steps, dtype=torch.int64)
+            state_dict[prefix + ACTION_FEATURE_DIM_STATE_KEY] = torch.tensor(self.action_feature_dim, dtype=torch.int64)
+        return state_dict
+
+    def extra_trainable_state_dict_keys(self):
+        if self.action_steps is None or self.action_feature_dim is None:
+            return []
+        return [ACTION_STEPS_STATE_KEY, ACTION_FEATURE_DIM_STATE_KEY]
+
+    def configure_from_state_dict_metadata(self, state_dict):
+        has_action_steps = ACTION_STEPS_STATE_KEY in state_dict
+        has_action_feature_dim = ACTION_FEATURE_DIM_STATE_KEY in state_dict
+        if not has_action_steps and not has_action_feature_dim:
+            return
+        if has_action_steps != has_action_feature_dim:
+            raise RuntimeError("Action-conditioning checkpoint metadata is incomplete.")
+        self.configure_action_conditioning(
+            int(state_dict[ACTION_STEPS_STATE_KEY].item()),
+            int(state_dict[ACTION_FEATURE_DIM_STATE_KEY].item()),
+        )
+
+    def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
+        state_dict = dict(state_dict)
+        self.configure_from_state_dict_metadata(state_dict)
+        action_steps = state_dict.pop(ACTION_STEPS_STATE_KEY, None)
+        action_feature_dim = state_dict.pop(ACTION_FEATURE_DIM_STATE_KEY, None)
+        if action_steps is not None or action_feature_dim is not None:
+            assert action_steps is not None and action_feature_dim is not None
+        has_action_weights = any(key.startswith(ACTION_STATE_PREFIXES) for key in state_dict)
+        if has_action_weights and self.action_embedder is None:
+            raise RuntimeError(
+                "Action-conditioning weights were found, but action_steps/action_feature_dim metadata is missing. "
+                "Reload with checkpoint metadata or provide constructor overrides before loading."
+            )
+        allow_missing_action_weights = self.action_embedder is not None and not has_action_weights
+        incompatible_keys = super().load_state_dict(state_dict, strict=False, assign=assign)
+        if allow_missing_action_weights:
+            self.initialize_missing_action_conditioning()
+        if strict:
+            missing_keys = list(incompatible_keys.missing_keys)
+            unexpected_keys = list(incompatible_keys.unexpected_keys)
+            if allow_missing_action_weights:
+                missing_keys = [
+                    key for key in missing_keys
+                    if not key.startswith(ACTION_STATE_PREFIXES)
+                ]
+            if missing_keys or unexpected_keys:
+                error_messages = []
+                if unexpected_keys:
+                    error_messages.append(
+                        "Unexpected key(s) in state_dict: {}.".format(
+                            ", ".join(f'"{key}"' for key in unexpected_keys)
+                        )
+                    )
+                if missing_keys:
+                    error_messages.append(
+                        "Missing key(s) in state_dict: {}.".format(
+                            ", ".join(f'"{key}"' for key in missing_keys)
+                        )
+                    )
+                raise RuntimeError(
+                    f"Error(s) in loading state_dict for {self.__class__.__name__}:\n\t" + "\n\t".join(error_messages)
+                )
+        return incompatible_keys
+
+    def _prepare_action_input(
+        self,
+        action: Optional[torch.Tensor],
+        batch_size: int,
+        device: torch.device,
+    ):
+        if action is None:
+            return None
+        if self.action_embedder is None or self.action_steps is None or self.action_feature_dim is None or self.action_flat_dim is None:
+            raise RuntimeError(
+                "Wan action conditioning is not configured. "
+                "Call configure_action_conditioning(action_steps, action_feature_dim) before using action inputs."
+            )
+
+        if not torch.is_tensor(action):
+            action = torch.as_tensor(action, device=device)
+        else:
+            action = action.to(device=device)
+        if action.numel() == 0:
+            return None
+
+        if action.ndim == 1:
+            if action.shape[0] != self.action_flat_dim:
+                raise ValueError(
+                    f"Expected flattened action dim {self.action_flat_dim}, got {tuple(action.shape)}"
+                )
+            action = action.reshape(1, self.action_flat_dim)
+        elif action.ndim == 2:
+            if action.shape[0] == self.action_steps:
+                action = action.unsqueeze(0)
+            elif action.shape[1] != self.action_flat_dim:
+                raise ValueError(
+                    f"Expected action shape [T, D] with T={self.action_steps} or flattened dim {self.action_flat_dim}, "
+                    f"got {tuple(action.shape)}"
+                )
+        elif action.ndim != 3:
+            raise ValueError(f"Expected action to have 1, 2, or 3 dims, got shape {tuple(action.shape)}")
+
+        if action.ndim == 3:
+            if action.shape[1] != self.action_steps:
+                raise ValueError(
+                    f"Expected action time dimension {self.action_steps}, got {action.shape[1]}"
+                )
+            if action.shape[2] < self.action_feature_dim:
+                action = F.pad(action, (0, self.action_feature_dim - action.shape[2]))
+            elif action.shape[2] > self.action_feature_dim:
+                action = action[:, :, :self.action_feature_dim]
+            action = action.reshape(action.shape[0], self.action_flat_dim)
+
+        if action.shape[0] == 1 and batch_size != 1:
+            action = action.expand(batch_size, -1)
+        elif action.shape[0] != batch_size:
+            raise ValueError(f"Expected action batch dimension 1 or {batch_size}, got shape {tuple(action.shape)}")
+
+        return action.contiguous()
+
+    def build_conditioned_time_embedding(
+        self,
+        timestep: torch.Tensor,
+        action: Optional[torch.Tensor] = None,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+        expand_to_sequence: bool = False,
+    ):
+        t = build_wan_time_embedding(
+            self.time_embedding,
+            self.freq_dim,
+            timestep,
+            device=device,
+            dtype=dtype,
+            expand_to_sequence=expand_to_sequence,
+        )
+        if action is None:
+            return t
+
+        device = t.device if device is None else device
+        action_input = self._prepare_action_input(action, batch_size=t.shape[0], device=device)
+        if action_input is None:
+            return t
+
+        action_embed = self.action_embedder(action_input.to(dtype=t.dtype))
+        if t.ndim == 3:
+            action_embed = action_embed.unsqueeze(1).expand(-1, t.shape[1], -1)
+        return self.action_t_embedding_norm(t + action_embed.to(dtype=t.dtype))
 
     def patchify(self, x: torch.Tensor, control_camera_latents_input: Optional[torch.Tensor] = None):
         x = self.patch_embedding(x)
@@ -358,12 +617,17 @@ class WanModel(torch.nn.Module):
                 context: torch.Tensor,
                 clip_feature: Optional[torch.Tensor] = None,
                 y: Optional[torch.Tensor] = None,
+                action: Optional[torch.Tensor] = None,
                 use_gradient_checkpointing: bool = False,
                 use_gradient_checkpointing_offload: bool = False,
                 **kwargs,
                 ):
-        t = self.time_embedding(
-            sinusoidal_embedding_1d(self.freq_dim, timestep).to(x.dtype))
+        t = self.build_conditioned_time_embedding(
+            timestep,
+            action=action,
+            device=x.device,
+            dtype=x.dtype,
+        )
         t_mod = self.time_projection(t).unflatten(1, (6, self.dim))
         context = self.text_embedding(context)
         

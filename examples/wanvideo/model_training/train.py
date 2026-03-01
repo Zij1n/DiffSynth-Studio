@@ -1,5 +1,5 @@
 import torch, os, argparse, accelerate, warnings
-from diffsynth.core import UnifiedDataset
+from diffsynth.core import UnifiedDataset, WanActionConditionedDataset
 from diffsynth.core.data.operators import LoadVideo, LoadAudio, ImageCropAndResize, ToAbsolutePath
 from diffsynth.pipelines.wan_video import WanVideoPipeline, ModelConfig
 from diffsynth.diffusion import *
@@ -23,6 +23,8 @@ class WanTrainingModule(DiffusionTrainingModule):
         task="sft",
         max_timestep_boundary=1.0,
         min_timestep_boundary=0.0,
+        action_steps=None,
+        action_feature_dim=None,
     ):
         super().__init__()
         # Warning
@@ -32,6 +34,19 @@ class WanTrainingModule(DiffusionTrainingModule):
         
         # Load models
         model_configs = self.parse_model_configs(model_paths, model_id_with_origin_paths, fp8_models=fp8_models, offload_models=offload_models, device=device)
+        if action_steps is not None or action_feature_dim is not None:
+            if action_steps is None or action_feature_dim is None:
+                raise ValueError("action_steps and action_feature_dim must be provided together.")
+            action_model_overrides = {
+                "diffsynth.models.wan_video_dit.WanModel": {
+                    "action_steps": action_steps,
+                    "action_feature_dim": action_feature_dim,
+                }
+            }
+            for model_config in model_configs:
+                existing_overrides = {} if model_config.model_config_overrides is None else dict(model_config.model_config_overrides)
+                existing_overrides.update(action_model_overrides)
+                model_config.model_config_overrides = existing_overrides
         tokenizer_config = ModelConfig(model_id="Wan-AI/Wan2.1-T2V-1.3B", origin_file_pattern="google/umt5-xxl/") if tokenizer_path is None else ModelConfig(tokenizer_path)
         audio_processor_config = ModelConfig(model_id="Wan-AI/Wan2.2-S2V-14B", origin_file_pattern="wav2vec2-large-xlsr-53-english/") if audio_processor_path is None else ModelConfig(audio_processor_path)
         self.pipe = WanVideoPipeline.from_pretrained(torch_dtype=torch.bfloat16, device=device, model_configs=model_configs, tokenizer_config=tokenizer_config, audio_processor_config=audio_processor_config)
@@ -75,7 +90,7 @@ class WanTrainingModule(DiffusionTrainingModule):
         return inputs_shared
     
     def get_pipeline_inputs(self, data):
-        inputs_posi = {"prompt": data["prompt"]}
+        inputs_posi = {"prompt": data.get("prompt", "")}
         inputs_nega = {}
         inputs_shared = {
             # Assume you are using this pipeline for inference,
@@ -96,6 +111,8 @@ class WanTrainingModule(DiffusionTrainingModule):
             "max_timestep_boundary": self.max_timestep_boundary,
             "min_timestep_boundary": self.min_timestep_boundary,
         }
+        if "action" in data:
+            inputs_shared["action"] = data["action"]
         inputs_shared = self.parse_extra_inputs(data, self.extra_inputs, inputs_shared)
         return inputs_shared, inputs_posi, inputs_nega
     
@@ -112,6 +129,14 @@ def wan_parser():
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
     parser = add_general_config(parser)
     parser = add_video_size_config(parser)
+    parser.add_argument("--dataset_type", type=str, default="unified", choices=("unified", "cloth_folding_action"), help="Dataset implementation to use.")
+    parser.add_argument("--action_dataset_split", type=str, default="train", choices=("train", "val", "test"), help="Split for the action-conditioned dataset.")
+    parser.add_argument("--action_dataset_sequence_interval", type=int, default=1, help="Frame interval between action-conditioned samples.")
+    parser.add_argument("--action_dataset_val_start_frame_interval", type=int, default=1, help="Validation/test start-frame stride for the action-conditioned dataset.")
+    parser.add_argument("--action_dataset_prompt", type=str, default="cloth folding", help="Fallback prompt for action-conditioned samples with empty text.")
+    parser.add_argument("--action_dataset_camera_id", type=int, default=0, help="Camera index to read from action-conditioned annotations.")
+    parser.add_argument("--action_dataset_precomputed_action_key", type=str, default="action", help="Annotation key containing the precomputed action tensor.")
+    parser.add_argument("--action_feature_dim", type=int, default=None, help="Target per-step action feature dimension. Actions are padded or clipped to this width before learned embedding.")
     parser.add_argument("--tokenizer_path", type=str, default=None, help="Path to tokenizer.")
     parser.add_argument("--audio_processor_path", type=str, default=None, help="Path to the audio processor. If provided, the processor will be used for Wan2.2-S2V model.")
     parser.add_argument("--max_timestep_boundary", type=float, default=1.0, help="Max timestep boundary (for mixed models, e.g., Wan-AI/Wan2.2-I2V-A14B).")
@@ -120,14 +145,30 @@ def wan_parser():
     return parser
 
 
-if __name__ == "__main__":
-    parser = wan_parser()
-    args = parser.parse_args()
-    accelerator = accelerate.Accelerator(
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        kwargs_handlers=[accelerate.DistributedDataParallelKwargs(find_unused_parameters=args.find_unused_parameters)],
-    )
-    dataset = UnifiedDataset(
+def build_dataset(args):
+    if args.dataset_type == "cloth_folding_action":
+        frame_processor = ImageCropAndResize(
+            args.height,
+            args.width,
+            args.max_pixels,
+            height_division_factor=16,
+            width_division_factor=16,
+        )
+        return WanActionConditionedDataset(
+            base_path=args.dataset_base_path,
+            split=args.action_dataset_split,
+            repeat=args.dataset_repeat,
+            num_frames=args.num_frames,
+            sequence_interval=args.action_dataset_sequence_interval,
+            frame_processor=frame_processor,
+            prompt_fallback=args.action_dataset_prompt,
+            camera_id=args.action_dataset_camera_id,
+            use_precomputed_action=True,
+            precomputed_action_key=args.action_dataset_precomputed_action_key,
+            val_start_frame_interval=args.action_dataset_val_start_frame_interval,
+        )
+
+    return UnifiedDataset(
         base_path=args.dataset_base_path,
         metadata_path=args.dataset_metadata_path,
         repeat=args.dataset_repeat,
@@ -148,6 +189,18 @@ if __name__ == "__main__":
             "input_audio": ToAbsolutePath(args.dataset_base_path) >> LoadAudio(sr=16000),
         }
     )
+
+
+if __name__ == "__main__":
+    parser = wan_parser()
+    args = parser.parse_args()
+    if args.dataset_type == "cloth_folding_action" and args.action_feature_dim is None:
+        parser.error("--action_feature_dim is required when --dataset_type=cloth_folding_action.")
+    accelerator = accelerate.Accelerator(
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        kwargs_handlers=[accelerate.DistributedDataParallelKwargs(find_unused_parameters=args.find_unused_parameters)],
+    )
+    dataset = build_dataset(args)
     model = WanTrainingModule(
         model_paths=args.model_paths,
         model_id_with_origin_paths=args.model_id_with_origin_paths,
@@ -169,6 +222,8 @@ if __name__ == "__main__":
         device="cpu" if args.initialize_model_on_cpu else accelerator.device,
         max_timestep_boundary=args.max_timestep_boundary,
         min_timestep_boundary=args.min_timestep_boundary,
+        action_steps=args.num_frames - 1 if args.action_feature_dim is not None else None,
+        action_feature_dim=args.action_feature_dim,
     )
     model_logger = ModelLogger(
         args.output_path,

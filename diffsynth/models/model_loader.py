@@ -29,16 +29,19 @@ class ModelPool:
             module_map = None
         return module_map
     
-    def load_model_file(self, config, path, vram_config, vram_limit=None):
+    def load_model_file(self, config, path, vram_config, model_config=None, vram_limit=None):
         model_class = self.import_model_class(config["model_class"])
-        model_config = config.get("extra_kwargs", {})
+        model_kwargs = dict(config.get("extra_kwargs", {}))
+        if model_config is not None and model_config.model_config_overrides is not None:
+            model_kwargs.update(model_config.model_config_overrides.get(config["model_name"], {}))
+            model_kwargs.update(model_config.model_config_overrides.get(config["model_class"], {}))
         if "state_dict_converter" in config:
             state_dict_converter = self.import_model_class(config["state_dict_converter"])
         else:
             state_dict_converter = None
         module_map = self.fetch_module_map(config["model_class"], vram_config)
         model = load_model(
-            model_class, path, model_config,
+            model_class, path, model_kwargs,
             vram_config["computation_dtype"], vram_config["computation_device"],
             state_dict_converter,
             use_disk_map=True,
@@ -59,7 +62,7 @@ class ModelPool:
         }
         return vram_config
     
-    def auto_load_model(self, path, vram_config=None, vram_limit=None, clear_parameters=False):
+    def auto_load_model(self, path, model_config=None, vram_config=None, vram_limit=None, clear_parameters=False):
         print(f"Loading models from: {json.dumps(path, indent=4)}")
         if vram_config is None:
             vram_config = self.default_vram_config()
@@ -67,7 +70,7 @@ class ModelPool:
         loaded = False
         for config in MODEL_CONFIGS:
             if config["model_hash"] == model_hash:
-                model = self.load_model_file(config, path, vram_config, vram_limit=vram_limit)
+                model = self.load_model_file(config, path, vram_config, model_config=model_config, vram_limit=vram_limit)
                 if clear_parameters: self.clear_parameters(model)
                 self.model.append(model)
                 model_name = config["model_name"]

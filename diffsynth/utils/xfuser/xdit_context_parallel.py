@@ -60,12 +60,17 @@ def usp_dit_forward(self,
             context: torch.Tensor,
             clip_feature: Optional[torch.Tensor] = None,
             y: Optional[torch.Tensor] = None,
+            action: Optional[torch.Tensor] = None,
             use_gradient_checkpointing: bool = False,
             use_gradient_checkpointing_offload: bool = False,
             **kwargs,
             ):
-    t = self.time_embedding(
-        sinusoidal_embedding_1d(self.freq_dim, timestep))
+    t = self.build_conditioned_time_embedding(
+        timestep,
+        action=action,
+        device=x.device,
+        dtype=x.dtype,
+    )
     t_mod = self.time_projection(t).unflatten(1, (6, self.dim))
     context = self.text_embedding(context)
     

@@ -3,7 +3,6 @@ from typing import Optional, Union
 from dataclasses import dataclass
 from modelscope import snapshot_download
 from huggingface_hub import snapshot_download as hf_snapshot_download
-from typing import Optional
 
 
 @dataclass
@@ -22,6 +21,7 @@ class ModelConfig:
     preparing_dtype: Optional[torch.dtype] = None
     computation_device: Optional[Union[str, torch.device]] = None
     computation_dtype: Optional[torch.dtype] = None
+    model_config_overrides: Optional[dict] = None
     clear_parameters: bool = False
     
     def check_input(self):
