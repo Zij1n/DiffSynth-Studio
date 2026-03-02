@@ -60,6 +60,21 @@ def add_gradient_config(parser: argparse.ArgumentParser):
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Gradient accumulation steps.")
     return parser
 
+def add_profiler_config(parser: argparse.ArgumentParser):
+    parser.add_argument("--enable_profiler", default=False, action="store_true", help="Enable torch.profiler and export Perfetto-compatible traces.")
+    parser.add_argument("--profiler_trace_dir", type=str, default=None, help="Directory to store profiler traces. Defaults to <output_path>/profiler.")
+    parser.add_argument("--profiler_activities", type=str, default="cpu,cuda", help="Profiler activities to capture, comma-separated. Supported values: cpu,cuda.")
+    parser.add_argument("--profiler_wait_steps", type=int, default=1, help="Number of steps to skip before profiler warmup.")
+    parser.add_argument("--profiler_warmup_steps", type=int, default=1, help="Number of warmup steps before recording.")
+    parser.add_argument("--profiler_active_steps", type=int, default=3, help="Number of active recording steps per profiler cycle.")
+    parser.add_argument("--profiler_repeat", type=int, default=1, help="Number of times to repeat the profiler schedule.")
+    parser.add_argument("--profiler_record_shapes", default=False, action="store_true", help="Record tensor shapes in profiler traces.")
+    parser.add_argument("--profiler_profile_memory", default=False, action="store_true", help="Record memory events in profiler traces.")
+    parser.add_argument("--profiler_with_stack", default=False, action="store_true", help="Record Python stack traces in profiler output.")
+    parser.add_argument("--profiler_with_flops", default=False, action="store_true", help="Estimate operator FLOPs in profiler output.")
+    parser.add_argument("--profiler_all_processes", default=False, action="store_true", help="Profile every distributed process instead of rank 0 only.")
+    return parser
+
 def add_general_config(parser: argparse.ArgumentParser):
     parser = add_dataset_base_config(parser)
     parser = add_model_config(parser)
@@ -67,4 +82,5 @@ def add_general_config(parser: argparse.ArgumentParser):
     parser = add_output_config(parser)
     parser = add_lora_config(parser)
     parser = add_gradient_config(parser)
+    parser = add_profiler_config(parser)
     return parser
